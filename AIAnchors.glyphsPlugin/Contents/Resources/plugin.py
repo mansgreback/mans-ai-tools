@@ -32,7 +32,7 @@ OPTIONS = [("radio", "scope", "Place on", (["All glyphs", "Selected glyphs"], "A
            ("check", "replace", "Re-place anchors that already exist", True),
            ("check", "variants", "Variants get their base glyph's anchors (G.ss01, G.sc … as G)", True),
            ("check", "ai", "Glyphs in no list: let the model decide which anchors they need", False),
-           ("check", "snap", "Snap anchor height to baseline / x-height / cap height when within 2 %", True),
+           ("check", "snap", "Snap height to baseline, x-height or cap height (within 2 %)", True),
            ("check", "tab", "Open the anchored glyphs in a new tab", True)]
 
 

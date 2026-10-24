@@ -28,7 +28,7 @@ BRIEF = "Kerns A–Z a–z in the current master."
 
 OPTIONS = [("radio", "scope", "Kern", (["All glyphs", "Selected glyphs"], "All glyphs")),
            ("check", "uc", "Uppercase", True), ("check", "lc", "Lowercase", True), ("check", "fig", "Figures", True), ("check", "punct", "Punctuation and symbols", True),
-           ("radio", "accents", "Accented glyphs", (["Kern individually", "Inherit their base"], "Kern individually")),
+           ("radio", "accents", "Accented glyphs", (["Kern individually", "Inherit base"], "Kern individually")),
            ("check", "fill", "Fill in missing kerning only (keep existing pairs)", False),
            ("text", "strength", "Strength %", "100"),
            ("check", "group", "Group glyphs that kern alike", True),
@@ -50,7 +50,7 @@ def kern(opts=None):
 	if simple.TIER["tier"] == "full":
 		num = lambda k, d: float(str(opts.get(k, d)).replace(",", ".") or d)
 		settings = dict(scope="selected" if opts.get("scope") == "Selected glyphs" else "all", uc=bool(opts.get("uc", True)), lc=bool(opts.get("lc", True)),
-		                fig=bool(opts.get("fig", True)), punct=bool(opts.get("punct", True)), accents="inherit" if opts.get("accents") == "Inherit their base" else "individual",
+		                fig=bool(opts.get("fig", True)), punct=bool(opts.get("punct", True)), accents="inherit" if str(opts.get("accents", "")).startswith("Inherit") else "individual",
 		                fill=bool(opts.get("fill", False)), strength=num("strength", 100) / 100.0, group=bool(opts.get("group", True)), keep_groups=bool(opts.get("keep", False)),
 		                tolerance=num("tolerance", 5), exceptions=num("exceptions", 5), threshold=num("threshold", 5))
 		if settings["scope"] == "selected":
