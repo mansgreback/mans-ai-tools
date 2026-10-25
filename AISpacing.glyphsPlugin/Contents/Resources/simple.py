@@ -13,8 +13,8 @@ PREF_SERVER = "com.mansgreback.MansTools.server"
 PREF_KEY = "com.mansgreback.MansTools.key"                  # one key for all Måns AI Tools plugins (the full plugins use the same)            # defaults write com.GeorgSeifert.Glyphs4 com.mansgreback.MansTools.server http://127.0.0.1:5720/api
 BRAND = "Måns AI Tools"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-CAUTION = ("Save a copy of your work before running this. Font and install data will be sent to and processed on aringtypeface.com "
-           "server. Internet access is required. Do not submit any trademark/copyright protected or confidential works.")
+CAUTION = ("Save a copy of your work before running this. Font and install data will be sent to, stored and processed on the "
+           "aringtypeface.com server. Internet access is required. Do not submit any confidential or protected work, nor work you do not own.")
 LOG = os.path.join(tempfile.gettempdir(), "MansToolsSimple.log")
 
 
@@ -58,11 +58,52 @@ def check_tier(tool="anchors", move=False):
 		TIER.update(tier="free", msg=""); return "free"
 	st, b = call(dict(tool=tool, action="status", key=k, install=identity(), move=bool(move)), 30)
 	TIER["code"] = str(b.get("code") or "")
-	if st == 200 and b.get("tier") == "full": TIER.update(tier="full", msg="Full version active.")
+	if st == 200 and b.get("tier") == "full": TIER.update(tier="full", msg="", kind=str(b.get("kind") or "pro"), days=b.get("days_left"))
 	elif st == 0: TIER.update(tier="free", msg=b.get("error") or "The server could not be reached.")
+	elif TIER["code"] == "expired": TIER.update(tier="free", msg="This demo license has expired. Running as the free version.")
 	elif TIER["code"] == "tied": TIER.update(tier="free", msg="This license is active on another computer. Click Move here to use it on this computer instead. The other computer will be deactivated permanently and it will not be possible to reactivate it on that machine.")
 	else: TIER.update(tier="free", msg=(b.get("error") or "The license is not valid.") + " Running as the free version.")
 	return TIER["tier"]
+
+
+def version_text():
+	"""This plugin's version as shown in the dialog: 1.0.0 -> v1.000 (from the bundle's Info.plist)."""
+	try:
+		import plistlib
+		with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Info.plist"), "rb") as f:
+			p = str(plistlib.load(f).get("CFBundleShortVersionString") or "").split(".")
+		return "v%s.%d%02d" % (p[0], int(p[1]) if len(p) > 1 else 0, int(p[2]) if len(p) > 2 else 0)
+	except Exception:
+		return ""
+
+
+def status_line():
+	"""-> (text, the part to show bold or ""): Måns Tools v1.000 · Professional / Student / Demo: expires in 23 days / Free Version"""
+	head = ("Måns Tools " + version_text()).strip() + " · "
+	if TIER["tier"] != "full": return head + "Free Version", ""
+	kind = TIER.get("kind") or "pro"
+	if kind == "demo":
+		d = TIER.get("days")
+		if d is None: return head + "Demo", ""
+		d = max(1, int(d)); return head + "Demo: expires in %d day%s" % (d, "" if d == 1 else "s"), str(d)
+	return head + ("Student" if kind == "student" else "Professional"), ""
+
+
+def show_status(box):
+	"""The status line in a text box: a message when there is one (license moved elsewhere, server unreachable …), else the
+	version and license line, the days of a demo in bold."""
+	try:
+		from AppKit import NSFont, NSColor, NSMutableAttributedString, NSFontAttributeName, NSForegroundColorAttributeName
+		text, bold = (TIER["msg"], "") if TIER.get("msg") else status_line()
+		size = NSFont.smallSystemFontSize()
+		a = NSMutableAttributedString.alloc().initWithString_attributes_(text, {NSFontAttributeName: NSFont.systemFontOfSize_(size), NSForegroundColorAttributeName: NSColor.secondaryLabelColor()})
+		if bold:
+			i = text.rfind(bold)
+			a.addAttribute_value_range_(NSFontAttributeName, NSFont.boldSystemFontOfSize_(size), (i, len(bold)))
+		box.getNSTextField().setAttributedStringValue_(a)
+	except Exception:
+		try: box.set(TIER.get("msg") or status_line()[0])
+		except Exception: pass
 
 
 def buy_url(title=""):
@@ -106,6 +147,19 @@ def identity():
 	return out
 
 
+def tls():
+	"""An HTTPS context that trusts the usual roots. Glyphs 3's Python ships without them (CERTIFICATE_VERIFY_FAILED), so
+	fall back to certifi or the macOS bundle when the default paths hold no certificates."""
+	ctx = ssl.create_default_context()
+	if ctx.cert_store_stats().get("x509_ca"): return ctx
+	for f in (lambda: __import__("certifi").where(), lambda: "/etc/ssl/cert.pem"):
+		try:
+			cafile = f()
+			if cafile and os.path.exists(cafile): return ssl.create_default_context(cafile=cafile)
+		except Exception: pass
+	return ctx
+
+
 def call(body, timeout=900):
 	"""-> (status, dict). status 0 = the server could not be reached."""
 	from urllib.request import Request, urlopen
@@ -113,7 +167,7 @@ def call(body, timeout=900):
 	url = server()
 	req = Request(url, data=json.dumps(body, separators=(",", ":")).encode("utf-8"), headers={"Content-Type": "application/json", "User-Agent": "MansToolsSimple/1.0"}, method="POST")
 	try:
-		with urlopen(req, context=ssl.create_default_context() if url.startswith("https") else None, timeout=timeout) as r:
+		with urlopen(req, context=tls() if url.startswith("https") else None, timeout=timeout) as r:
 			return r.status, json.loads(r.read().decode("utf-8"))
 	except HTTPError as e:
 		try: return e.code, json.loads(e.read().decode("utf-8"))
@@ -158,46 +212,141 @@ def letters(font):
 	return [g for g in font.glyphs if is_letter(g)]
 
 
+CALL = {}                                                                # the call in progress from a script / the Glyphs MCP server (register())
+API = {}
+
+
+def register(name, fn, options, extra=()):
+	"""Makes a plugin's run callable from scripts and the Glyphs MCP server, on any thread, nothing opened or shown:
+	    import MansAITools
+	    MansAITools.kern(font=Glyphs.fonts[0], glyphs=["A", "V"], strength="80")
+	Keyword arguments = the dialog's options by key, values as the dialog has them (True/False, the label of a choice, text);
+	left out = the dialog's default. font = any open font (default the front one), master = a master or its name (default
+	the selected one), glyphs = glyph names to work on instead of the selection. Returns (message, names of the adjusted glyphs).
+	The free version works on A–Z a–z with the defaults, as in the dialog. MansAITools.API lists the tools."""
+	defaults = dict((k, d[1] if isinstance(d, tuple) else d) for _, k, _, d in options)
+
+	def call(font=None, master=None, glyphs=None, **opts):
+		kw = dict((k, opts.pop(k)) for k in list(opts) if k in extra)
+		bad = sorted(set(opts) - set(defaults))
+		if bad: raise TypeError("%s: unknown option %s. Options: %s" % (name, ", ".join(bad), ", ".join(sorted(defaults) + list(extra))))
+		o = dict(defaults); o.update(opts)
+		if glyphs is not None:
+			glyphs = [str(n) for n in ([glyphs] if isinstance(glyphs, str) else glyphs)]
+			if "scope" in o: o["scope"] = "Selected glyphs"
+		CALL.clear(); CALL.update(font=font, master=master, glyphs=glyphs)
+		try:
+			if TIER["tier"] != "full" and key(): check_tier(name)                 # a script may run before the plugin's own check came back
+			if kw:
+				f = font or Glyphs_font()
+				if glyphs is None: raise ValueError("%s: give glyphs=[…] with %s." % (name, ", ".join(sorted(kw))))
+				return result_parts(fn(o, targets=[f.glyphs[n] for n in glyphs if f.glyphs[n] is not None], **kw))
+			return result_parts(fn(o))
+		finally:
+			CALL.clear()
+	call.__name__ = str(name); call.__doc__ = "%s(font=None, master=None, glyphs=None, %s)\n\n%s" % (
+		name, ", ".join("%s=%r" % kv for kv in sorted(defaults.items())) + "".join(", %s=…" % k for k in extra), register.__doc__)
+	API[name] = call; globals()[name] = call
+	return call
+
+
+def Glyphs_font():
+	from GlyphsApp import Glyphs
+	return Glyphs.font
+
+
+def target():
+	"""-> (font, master) of the run: the script's choice, else the front font and its selected master."""
+	font = CALL.get("font") or Glyphs_font()
+	if font is None: raise RuntimeError("Open a font first.")
+	m = CALL.get("master")
+	if isinstance(m, str):
+		m = next((x for x in font.masters if str(x.name) == m), None)
+		if m is None: raise ValueError("No master called %r." % CALL.get("master"))
+	return font, m or font.selectedFontMaster or font.masters[0]
+
+
+def on_main_thread():
+	try:
+		from Foundation import NSThread
+		return bool(NSThread.isMainThread())
+	except Exception:
+		return True
+
+
+import sys as _sys
+_sys.modules.setdefault("MansAITools", _sys.modules[__name__])
+
+
 def selected_names(font):
-	"""The glyphs selected in the font view or the current tab."""
+	"""The glyphs selected in the font view or the current tab (or the ones a script named)."""
+	if CALL.get("glyphs") is not None: return set(CALL["glyphs"])
 	try: return set(str(l.parent.name) for l in (font.selectedLayers or []) if l is not None and l.parent is not None)
 	except Exception: return set()
 
 
-def worked(font, master, need_paths=True):
-	"""The glyphs a run works on: A–Z a–z, or every glyph of the font with the full version (a valid key)."""
+def worked(font, master, need_paths=True, components=False):
+	"""The glyphs a run works on: A–Z a–z, or every glyph of the font with the full version (a valid key).
+	components=True: glyphs made of components count by their decomposed outlines."""
 	pool = list(font.glyphs) if TIER["tier"] == "full" else letters(font)
 	out = []
 	for g in pool:
 		L = g.layers[master.id]
 		if L is None: continue
-		if need_paths and not closed_paths(L): continue
+		if need_paths and not closed_paths(L, components): continue
 		out.append(g)
 	return out
 
 
-def closed_paths(layer):
+def closed_paths(layer, components=False):
+	"""The closed outlines of a layer; components=True also those of its components (decomposed, as drawn)."""
+	if components:
+		try:
+			if len(list(layer.components)): layer = layer.copyDecomposedLayer()
+		except Exception: pass
 	try: paths = list(layer.paths)
 	except Exception: paths = [s for s in layer.shapes if hasattr(s, "nodes")]
 	return [p for p in paths if p.closed and len(p.nodes) >= 3]
 
 
-def glyph_json(g, layer):
+def glyph_json(g, layer, components=False):
 	uni = None
 	try: uni = int(g.unicode, 16) if g.unicode else None
 	except Exception: pass
 	d = dict(name=str(g.name), unicode=uni, width=float(layer.width), lsb=float(layer.LSB), rsb=float(layer.RSB),
-	         paths=[[[float(n.position.x), float(n.position.y), str(n.type)] for n in p.nodes] for p in closed_paths(layer)])
+	         paths=[[[float(n.position.x), float(n.position.y), str(n.type)] for n in p.nodes] for p in closed_paths(layer, components)])
+	try: d['comps'] = [str(c.componentName) for c in layer.components]
+	except Exception: pass
 	try: d.update(cat=str(g.category or ""), sub=str(g.subCategory or ""), case=int(getattr(g, "case", 0) or 0), script=str(g.script or ""), export=bool(g.export), lg=str(g.leftKerningGroup) if g.leftKerningGroup else None, rg=str(g.rightKerningGroup) if g.rightKerningGroup else None)
 	except Exception: pass
 	return d
 
 
-def font_json(font, master, glyphs, settings=None):
+def metric(font, master, attr, glyph_names=(), default=0.0):
+	"""A master metric, or (missing: Glyphs 3 answers NSNotFound, Glyphs 4 a default) the top of the first of glyph_names that
+	has outlines, else default × upm."""
+	upm = float(font.upm or 1000)
+	try: v = float(getattr(master, attr) or 0)
+	except Exception: v = 0.0
+	if 0 < abs(v) < 4 * upm and not (attr == "capHeight" and glyph_names and v == 720 and not cap_defined(font)): return v
+	for n in glyph_names:
+		g = font.glyphs[n]; L = g.layers[master.id] if g is not None else None
+		if L is not None and closed_paths(L):
+			b = L.bounds; return float(b.origin.y + b.size.height)
+	return v if 0 < abs(v) < 4 * upm else default * upm
+
+
+def cap_defined(font):
+	"""Whether the font defines a cap height metric (Glyphs 3 file format: font.metrics, type 2 = cap height)."""
+	try: return any(getattr(m, "type", None) == 2 for m in font.metrics)
+	except Exception: return True
+
+
+def font_json(font, master, glyphs, settings=None, components=False):
 	"""The font data a simple plugin sends: metrics of the master and the A–Z a–z outlines."""
-	return dict(upm=float(font.upm), cap=float(master.capHeight or 0), xheight=float(master.xHeight or 0), ascender=float(master.ascender or 0),
+	return dict(upm=float(font.upm), cap=metric(font, master, "capHeight", ("H", "I", "E"), 0.7), xheight=float(master.xHeight or 0), ascender=float(master.ascender or 0),
 	            descender=float(master.descender or 0), italic=float(master.italicAngle or 0), grid=float(font.grid), family=str(font.familyName),
-	            glyphs=[glyph_json(g, g.layers[master.id]) for g in glyphs if g.layers[master.id] is not None], settings=settings or {})
+	            glyphs=[glyph_json(g, g.layers[master.id], components) for g in glyphs if g.layers[master.id] is not None], settings=settings or {})
 
 
 FULL = "One license, bought once, unlocks all Måns AI Tools plugins: AI Kerning, AI Spacing, AI Anchors and AI Variable Font."
@@ -211,8 +360,10 @@ class Dialog(object):
 	Buy is gone, License key stays (Remove key there), Close / action are two equal buttons. "Settings" folds the option rows away (remembered). The callback gets the option values as a dict. Messages go to the status line."""
 	W = 440; M = 16; GAP = 24
 
-	def __init__(self, title, brief, action, callback, about="", options=(), prefs=""):
+	def __init__(self, title, brief, action, callback, about="", options=(), prefs="", hooks=None, when=None):
 		self.title, self.brief, self.action, self.callback, self.options, self.prefs = title, brief, action, callback, list(options), prefs
+		self.when = when or {}                                               # option name -> function(current values): show the row only when it has an effect
+		self.hooks = hooks or {}                                             # option name -> function(dialog, value), called when a popup changes (full version)
 		self.about_text = (about + "\n\n" + FULL + "\n\n" + CAUTION).strip(); self.shown = False; self.w = None
 
 	def pref(self, name, default):
@@ -235,39 +386,35 @@ class Dialog(object):
 			try: self.w.close()
 			except Exception: pass
 		w = vanilla.Window((W, 10), self.title); self.w = w
-		w.title = vanilla.TextBox((M, 0, -M, 22), self.title)
-		try: w.title.getNSTextField().setFont_(NSFont.boldSystemFontOfSize_(15))
-		except Exception: pass
-		w.brief = vanilla.TextBox((M, 0, -M, 20), self.brief)
-		w.msg = vanilla.TextBox((M, 0, -M, 32), TIER["msg"] if key() else "", sizeStyle="small")
-		try: w.msg.getNSTextField().setTextColor_(NSColor.secondaryLabelColor())
-		except Exception: pass
+		w.msg = vanilla.TextBox((M, 0, -M, 32), "", sizeStyle="small"); show_status(w.msg)          # Måns Tools v1.000 · Professional, or a message
 		# the options: a group of rows, live in the full version, shown but disabled (grey) in the free version, never read there
-		self.controls = {}; y = 0; grey = []
-		w.opts = vanilla.Group((0, 0, W, 10))
+		self.controls = {}; y = 0; grey = []; self.rows = []                # rows: (name, [(control, y offset)], height); shown or hidden by self.when
+		w.opts = vanilla.Group((0, 0, W, 10)); ch = self.changed_
 		for kind, name, label, default in self.options:
 			val = self.pref(name, default) if full else (default[1] if kind in ("popup", "radio") else default)
 			lab = None
 			if kind == "check":
-				c = vanilla.CheckBox((M, y, -M, 20), label, value=bool(val)); y += 26
+				c = vanilla.CheckBox((M, 0, -M, 20), label, value=bool(val), callback=ch); h = 26
 			elif kind == "text":
-				lab = vanilla.TextBox((M, y + 3, 150, 17), label); c = vanilla.EditText((M + 156, y, -M, 22), str(val)); y += 30
+				lab = vanilla.TextBox((M, 3, 150, 17), label); c = vanilla.EditText((M + 156, 0, -M, 22), str(val)); h = 30
 			elif kind == "popup":
 				items, cur = default
-				lab = vanilla.TextBox((M, y + 3, 150, 17), label); c = vanilla.PopUpButton((M + 156, y, -M, 22), items); c.set(items.index(val) if val in items else items.index(cur)); y += 30
+				lab = vanilla.TextBox((M, 3, 150, 17), label); c = vanilla.PopUpButton((M + 156, 0, -M, 22), items, callback=self.hook(name, items)); c.set(items.index(val) if val in items else items.index(cur)); h = 30
 			elif kind == "radio":
 				items, cur = default
-				lab = vanilla.TextBox((M, y + 3, 150, 17), label); c = vanilla.RadioGroup((M + 156, y, -M, 22), items, isVertical=False); c.set(items.index(val) if val in items else items.index(cur)); y += 30
+				lab = vanilla.TextBox((M, 3, 150, 17), label); c = vanilla.RadioGroup((M + 156, 0, -M, 22), items, isVertical=False, callback=ch); c.set(items.index(val) if val in items else items.index(cur)); h = 30
 			elif kind == "heading":
-				lab = vanilla.TextBox((M, y + 6, -M, 17), label, sizeStyle="small"); y += 24; c = None
+				lab = vanilla.TextBox((M, 6, -M, 17), label, sizeStyle="small"); h = 24; c = None
 			else:
 				continue
-			if lab is not None: w.opts.__setattr__("lab_" + name, lab); grey.append(lab)
-			if c is None: continue
-			w.opts.__setattr__("opt_" + name, c)
-			if full: self.controls[name] = (kind, c)
-			else: c.enable(False)
-		self.h_opts = y + 6 if self.options else 0
+			parts = []
+			if lab is not None: w.opts.__setattr__("lab_" + name, lab); grey.append(lab); parts.append((lab, lab.getPosSize()[1]))
+			if c is not None:
+				w.opts.__setattr__("opt_" + name, c); parts.append((c, 0))
+				if full: self.controls[name] = (kind, c)
+				else: c.enable(False)
+			self.rows.append((name, parts, h))
+		self.place_rows()
 		if not full:
 			for lab in grey:
 				try: lab.getNSTextField().setTextColor_(NSColor.tertiaryLabelColor())
@@ -289,11 +436,50 @@ class Dialog(object):
 		self.shown = False; self.opts_shown = bool(self.pref("_settings", True))
 		self.layout(); w.setDefaultButton(w.go)
 
+	def hook(self, name, items):
+		f = self.hooks.get(name)
+		if f is None: return self.changed_
+		return lambda sender: (f(self, items[sender.get()]), self.changed_(sender))
+
+	def current(self):
+		"""The option values as the dialog shows them now (no prefs written)."""
+		out = {}
+		for kind, name, label, default in self.options:
+			if kind == "heading": continue
+			if name in self.controls:
+				k, c = self.controls[name]
+				out[name] = bool(c.get()) if k == "check" else (default[0][c.get()] if k in ("popup", "radio") else str(c.get()))
+			else:
+				out[name] = default[1] if kind in ("popup", "radio") else default
+		return out
+
+	def place_rows(self):
+		"""Stacks the option rows, leaving out the ones self.when says have no effect now (snap units while snapping is off)."""
+		cur = self.current(); y = 0
+		for name, parts, h in self.rows:
+			f = self.when.get(name); show = True
+			if f is not None:
+				try: show = bool(f(cur))
+				except Exception: show = True
+			for c, dy in parts:
+				x, _, cw, chh = c.getPosSize(); c.setPosSize((x, y + dy, cw, chh)); c.show(show)
+			if show: y += h
+		self.h_opts = y + 6 if self.options else 0
+
+	def changed_(self, sender):
+		try:
+			if self.when and self.w is not None: self.place_rows(); self.layout()
+		except Exception:
+			log("changed", traceback.format_exc())
+
+	def set_option(self, name, value):
+		"""Selects a popup's item by its label (e.g. back to the previous choice)."""
+		for kind, n, label, default in self.options:
+			if n == name and name in self.controls and value in default[0]: self.controls[name][1].set(default[0].index(value))
+
 	def layout(self):
 		"""Places the rows for the current state (settings shown or hidden, About open or closed) and sizes the window."""
 		w = self.w; M, W = self.M, self.W; y = 14
-		w.title.setPosSize((M, y, -M, 22)); y += 24
-		w.brief.setPosSize((M, y, -M, 20)); y += 22
 		w.msg.setPosSize((M, y, -M, 32)); y += 36
 		show = self.opts_shown and self.h_opts > 0
 		if hasattr(w, "settings"):                                          # the fold button sits right over the settings rows
@@ -305,13 +491,18 @@ class Dialog(object):
 			if hasattr(w, b):
 				x, _, bw, bh = getattr(w, b).getPosSize(); getattr(w, b).setPosSize((x, y, bw, bh))
 		y += 34
-		small = [w.about, w.licence]
+		full = TIER["tier"] == "full"                                       # licensed: License key moves under About (inside it); free: next to About
+		small = [w.about] if full else [w.about, w.licence]
 		widths = [90 if b is w.about else 100 for b in small]; gap = 12; x = (W - sum(widths) - gap * (len(small) - 1)) / 2.0
 		for b, bw in zip(small, widths):
 			b.setPosSize((x, y, bw, 20)); x += bw + gap
 		y += 26
 		w.about_text.setPosSize((M, y, -M, 190)); w.about_text.show(self.shown)
-		w.more.setPosSize(((W - 90) / 2.0, y + 194, 90, 20)); w.more.show(self.shown)
+		under = [w.more, w.licence] if full else [w.more]
+		widths = [90 if b is w.more else 100 for b in under]; x = (W - sum(widths) - gap * (len(under) - 1)) / 2.0
+		for b, bw in zip(under, widths):
+			b.setPosSize((x, y + 194, bw, 20)); x += bw + gap
+		w.more.show(self.shown); w.licence.show(self.shown or not full)
 		self.h_short = y + 4; self.h_long = y + 224
 		w.resize(W, self.h_long if self.shown else self.h_short)
 
@@ -370,7 +561,7 @@ class Dialog(object):
 		import vanilla
 		LW = self.W
 		lw = vanilla.Window((LW, 156), "License key"); self.lw = lw
-		lw.text = vanilla.TextBox((self.M, 12, -self.M, 17), "One key unlocks all Måns AI Tools plugins." if TIER["tier"] != "full" else "Full version active on this computer.", sizeStyle="small")
+		lw.text = vanilla.TextBox((self.M, 12, -self.M, 17), "One key unlocks all Måns AI Tools plugins." if TIER["tier"] != "full" else status_line()[0], sizeStyle="small")
 		lw.key = vanilla.EditText((self.M, 36, -self.M, 24), key(), placeholder="License key")
 		lw.msg = vanilla.TextBox((self.M, 100, -self.M, 48), "", sizeStyle="small")
 		if key():                                                             # a key stored: Close / Remove key / Activate, three equal buttons spaced as the main row
@@ -403,7 +594,7 @@ class Dialog(object):
 		if not typed:
 			self.remove_key_(None); return                                       # an empty field + Activate: the same as removing, no warning needed
 		move = str(self.lw.ok.getTitle()) == "Move here"                      # second click after a "tied" answer: move the licence here
-		tier = check_tier(move=move); self.lw.msg.set(TIER["msg"]); self.say(TIER["msg"])
+		tier = check_tier(move=move); show_status(self.lw.msg); show_status(self.w.msg)
 		self.lw.ok.setTitle("Move here" if TIER.get("code") == "tied" else "Activate")
 		if tier == "full":
 			try: self.lw.close()
@@ -426,7 +617,7 @@ class Dialog(object):
 		self.w.go.enable(True); self.w.go.setTitle(self.action)
 		try: self.w.close()
 		except Exception: pass
-		if opts.get("tab", True): open_tab(Glyphs.font, names)
+		if opts.get("tab", False): open_tab(Glyphs.font, names)          # only plugins with the new-tab option open one
 		try: Glyphs.showNotification(BRAND, msg)
 		except Exception: pass
 

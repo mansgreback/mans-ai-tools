@@ -9,7 +9,7 @@ Four plugins for Glyphs 3 and 4 that do the slow parts of type design for you, w
 | **Måns AI Anchors** | Places your anchors. |
 | **Måns AI Variable Font** | Makes a variable font from a single style font, every node kept. |
 
-Free on A–Z a–z, a few runs a day. One license, bought once, unlocks all four on every glyph, unlimited:
+Free on A–Z a–z, 10 runs a day per plugin. One license, bought once, unlocks all four on every glyph, unlimited:
 **https://aringtypeface.com/mans-tools/**
 
 ## Install
@@ -20,7 +20,7 @@ Through **Window ▸ Plugin Manager** in Glyphs, or download the pack from the p
 ## Use
 
 - AI Kerning, AI Spacing, AI Anchors: **Glyph** menu. AI Variable Font: **File** menu.
-- Save a copy of your work before running. Font and install data are sent to and processed on aringtypeface.com; internet access is required. Do not submit trademark/copyright protected or confidential works.
+- Save a copy of your work before running. Font and install data are sent to, stored and processed on aringtypeface.com; internet access is required. Do not submit any confidential or protected work, nor work you do not own.
 - Full version: click **License key** in any plugin, paste the key, **Activate**. One key, one computer at a time.
 
 ## Source

@@ -22,28 +22,29 @@ import simple
 from simple import log
 
 TITLE = "AI Kerning"
-ABOUT = "AI Kerning kerns your font for you. The full version kerns everything, unlimited: the whole font or any selection, with kerning groups and exceptions, and tolerance and threshold settings."
-BRIEF = "Kerns A–Z a–z in the current master."
+ABOUT = "AI Kerning kerns your font for you. The full version kerns the whole font or any selection, unlimited, with kerning groups, exceptions, a group tolerance and a lower limit for pairs."
+BRIEF = "Kerns the current master."
 
 
-OPTIONS = [("radio", "scope", "Kern", (["All glyphs", "Selected glyphs"], "All glyphs")),
-           ("check", "uc", "Uppercase", True), ("check", "lc", "Lowercase", True), ("check", "fig", "Figures", True), ("check", "punct", "Punctuation and symbols", True),
+OPTIONS = [("radio", "scope", "Kern", (["All glyphs", "Selected glyphs"], "All glyphs")),                 # inputs, then checkboxes, then grouping with its own inputs
            ("radio", "accents", "Accented glyphs", (["Kern individually", "Inherit base"], "Kern individually")),
-           ("check", "fill", "Fill in missing kerning only (keep existing pairs)", False),
            ("text", "strength", "Strength %", "100"),
+           ("text", "threshold", "Skip adjustments under", "5"),
+           ("check", "uc", "Uppercase", True), ("check", "lc", "Lowercase", True), ("check", "fig", "Figures", True), ("check", "punct", "Punctuation and symbols", True),
+           ("check", "fill", "Fill in missing kerning only (keep existing pairs)", False),
            ("check", "group", "Group glyphs that kern alike", True),
            ("check", "keep", "Keep the font's kerning groups", False),
            ("text", "tolerance", "Group tolerance", "5"),
            ("text", "exceptions", "Exceptions %", "5"),
-           ("text", "threshold", "Ignore pairs under", "5"),
            ("check", "tab", "Open the kerned glyphs in a new tab", True)]
+WHEN = dict(keep=lambda v: v.get("group"), tolerance=lambda v: v.get("group"), exceptions=lambda v: v.get("group"))   # grouping off: these do nothing
 
 
 def kern(opts=None):
-	font = Glyphs.font; master = font.selectedFontMaster or font.masters[0]
+	font, master = simple.target()
 	try: open(simple.LOG, "w").close()
 	except Exception: pass
-	glyphs = simple.worked(font, master)
+	glyphs = simple.worked(font, master, components=True)               # glyphs made of components (Aacute, b from a flipped d) count as drawn
 	log("start", TITLE, font.familyName, master.name, len(glyphs), "letters")
 	if len(glyphs) < 2: raise RuntimeError("Fewer than two of A–Z a–z have outlines in this master.")
 	opts = opts or {}; settings = {}
@@ -56,7 +57,7 @@ def kern(opts=None):
 		if settings["scope"] == "selected":
 			sel = simple.selected_names(font); settings["selected"] = sorted(sel)
 			if not sel: raise RuntimeError("Select the glyphs to kern first.")
-	data = simple.font_json(font, master, glyphs, settings)
+	data = simple.font_json(font, master, glyphs, settings, components=True)
 	if settings.get("scope") == "selected":                            # the kerning the model may change: the selection; the rest is context
 		data["kerning"] = []
 	try:                                                                 # existing kerning of this master, so the model can keep / fill it
@@ -99,6 +100,9 @@ def kern(opts=None):
 	return "%d pairs kerned in %s%s." % (n_set, master.name, (", %d glyphs grouped" % n_grp) if n_grp else ""), sorted(touched)
 
 
+simple.register("kern", kern, OPTIONS)                 # scripts and the Glyphs MCP server: MansAITools.kern(…)
+
+
 class AIKerning(GeneralPlugin):
 
 	@objc.python_method
@@ -113,7 +117,7 @@ class AIKerning(GeneralPlugin):
 
 	def openDialog_(self, sender):
 		try:
-			self.dlg = simple.Dialog(TITLE, BRIEF, "Kern", kern, about=ABOUT, options=OPTIONS, prefs="com.mansgreback.AIKerning."); self.dlg.open()
+			self.dlg = simple.Dialog(TITLE, BRIEF, "Kern", kern, about=ABOUT, options=OPTIONS, prefs="com.mansgreback.AIKerning.", when=WHEN); self.dlg.open()
 		except Exception:
 			traceback.print_exc(); log("DIALOG ERROR", traceback.format_exc())
 

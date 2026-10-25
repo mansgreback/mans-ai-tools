@@ -23,45 +23,81 @@ import simple
 from simple import log
 
 TITLE = "AI Anchors"
-ABOUT = "AI Anchors places your anchors for you. The full version does any Latin glyph, unlimited: letters, accents and combining marks (_top, _bottom), ogonek, center, topright and topleft, with an editable rules table."
-BRIEF = "Places top and bottom anchors on A–Z a–z in the current master."
+ABOUT = "AI Anchors places your anchors for you. The full version places anchors on any glyph, unlimited: top, bottom, ogonek, center, topright and topleft on letters, and _top and _bottom on accents and combining marks, with custom anchor sets and a right-click menu."
+BRIEF = "Places anchors in the current master."
 
 
-OPTIONS = [("radio", "scope", "Place on", (["All glyphs", "Selected glyphs"], "All glyphs")),
-           ("popup", "which", "Anchors", (["All rule anchors", "Top and bottom only"], "All rule anchors")),
-           ("check", "replace", "Re-place anchors that already exist", True),
-           ("check", "variants", "Variants get their base glyph's anchors (G.ss01, G.sc … as G)", True),
-           ("check", "ai", "Glyphs in no list: let the model decide which anchors they need", False),
-           ("check", "snap", "Snap height to baseline, x-height or cap height (within 2 %)", True),
+BASIC = "A–Z, a–z, marks"
+CUSTOM = "Custom…"
+AI_DECIDES = "Let the AI decide"
+WHEN = dict(snap_units=lambda v: v.get("snap_on"))           # rows shown only when they have an effect
+PREFS = "com.mansgreback.AIAnchors."
+OPTIONS = [("radio", "scope", "Place on", ([BASIC, "Selected glyphs"], BASIC)),
+           ("popup", "which", "Anchors", (["All rule anchors", "Top and bottom only", AI_DECIDES, CUSTOM], "All rule anchors")),
+           ("check", "replace", "Replace anchors that already exist", True),
+           ("check", "snap_on", "Snap height to baseline, x-height or cap height", False),
+           ("text", "snap_units", "Snap within (units)", "20"),
            ("check", "tab", "Open the anchored glyphs in a new tab", True)]
+
+
+def units(text):
+	try: return abs(float(str(text).replace(",", ".").strip() or 0))
+	except Exception: return 20.0
+
+
+def saved_sets():
+	"""The custom anchor sets the user saved: {name: {glyph: {"anchors": [...], "as": ref}}} (in the Glyphs preferences)."""
+	import json
+	try: return json.loads(str(Glyphs.defaults[PREFS + "sets"] or "{}"))
+	except Exception: return {}
+
+
+def save_sets(sets):
+	import json
+	Glyphs.defaults[PREFS + "sets"] = json.dumps(sets)
+
+
+def options():
+	"""OPTIONS with the saved sets in the Anchors popup, over Custom…"""
+	out = []
+	for kind, name, label, default in OPTIONS:
+		if name == "which": default = (default[0][:3] + sorted(saved_sets()) + [CUSTOM], default[1])
+		out.append((kind, name, label, default))
+	return out
 
 
 def anchors(opts=None, targets=None, replace=None, reset=False, treat_as=None):
 	"""One run. From the dialog: opts = its values. From the context menu (full version): targets = the glyphs, and
 	replace (Set = add the missing anchors only, Reset = clear the glyph and place every anchor anew),
 	treat_as = the name of the glyph whose anchor set the targets get (Custom anchors: H as R)."""
-	font = Glyphs.font; master = font.selectedFontMaster or font.masters[0]
+	font, master = simple.target()
 	try: open(simple.LOG, "w").close()
 	except Exception: pass
 	full = simple.TIER["tier"] == "full"; opts = opts or {}
 	if targets is not None:
 		if not full: raise RuntimeError("The full version is needed for this.")
-		glyphs = [g for g in targets if g.layers[master.id] is not None and simple.closed_paths(g.layers[master.id])]
+		glyphs = [g for g in targets if g.layers[master.id] is not None and simple.closed_paths(g.layers[master.id], True)]
 		if not glyphs: raise RuntimeError("No outlines in the selected glyphs.")
-		for k, d in (("which", "All rule anchors"), ("ai", False), ("snap", True), ("variants", True)):   # the dialog's remembered settings apply
+		for k, d in (("which", "All rule anchors"), ("snap_on", False), ("snap_units", "20")):   # the dialog's remembered settings apply
 			opts.setdefault(k, simple.Dialog.pref_of("com.mansgreback.AIAnchors.", k, d))
 	else:
-		glyphs = simple.worked(font, master)
-		if not glyphs: raise RuntimeError("None of A–Z a–z has outlines in this master.")
-		if full and opts.get("scope") == "Selected glyphs":
+		glyphs = simple.worked(font, master, components=True)                 # composites (d = b + …, Aacute) count by their decomposed outlines
+		if full and opts.get("scope") == "Selected glyphs":                   # any glyph; one in no rule list gets a reference glyph's anchor set (Aacute → A, ampersand → E)
 			sel = simple.selected_names(font); glyphs = [g for g in glyphs if str(g.name) in sel]
-			if not glyphs: raise RuntimeError("Select the glyphs first.")
+			if not glyphs: raise RuntimeError("Select the glyphs first (with outlines or components).")
+		elif full:                                                             # A–Z, a–z and the marks (acutecomb, dieresis …), and the glyphs of a chosen custom set
+			mine = saved_sets().get(str(opts.get("which") or "")) or {}
+			glyphs = [g for g in glyphs if simple.is_letter(g) or str(g.category or "") == "Mark" or str(g.name) in mine]
+		if not glyphs: raise RuntimeError("None of A–Z a–z has outlines in this master.")
 	log("start", TITLE, font.familyName, master.name, len(glyphs), "glyphs", "as", treat_as, "reset", reset)
 	if replace is None: replace = bool(opts.get("replace", True)) if full else True
-	settings = dict(anchors="topbottom" if opts.get("which") == "Top and bottom only" else "all", ai=bool(opts.get("ai", False)), snap=bool(opts.get("snap", True)),
-	                variants=bool(opts.get("variants", True)))
+	settings = dict(anchors={"Top and bottom only": "topbottom", AI_DECIDES: "ai"}.get(opts.get("which"), "all"), ai=opts.get("which") == AI_DECIDES, snap=bool(opts.get("snap_on", False)), snap_units=units(opts.get("snap_units", "20")),
+	                any=targets is not None or opts.get("scope") == "Selected glyphs",
+	                variants=True)                                       # variants (X.ss01, X.sc …) always get their base glyph's anchor names
+	custom = saved_sets().get(str(opts.get("which") or "")) if full else None
+	if custom: settings["custom"] = custom
 	if treat_as: settings["as"] = dict((str(g.name), str(treat_as)) for g in glyphs)
-	data = simple.font_json(font, master, glyphs, settings)
+	data = simple.font_json(font, master, glyphs, settings, components=True)
 	answer = simple.run("anchors", data); res = (answer["result"] or {}).get("anchors") or {}
 	font.disableUpdateInterface()
 	try:
@@ -81,7 +117,168 @@ def anchors(opts=None, targets=None, replace=None, reset=False, treat_as=None):
 		font.enableUpdateInterface()
 	simple.stamp(font, "Anchors", TITLE, answer)
 	log("applied", n, "added", moved, "moved")
-	return "%d anchors added, %d moved, in %s." % (n, moved, master.name), done
+	r = answer["result"] or {}; refs = r.get("refs") or {}; skipped = r.get("skipped") or []
+	msg = "%d anchors added, %d moved, in %s." % (n, moved, master.name)
+	if refs: msg += " As their reference glyph: %s." % ", ".join("%s as %s" % kv for kv in sorted(refs.items())[:6]) + (" …" if len(refs) > 6 else "")
+	if skipped: msg += " No reference for %s: use Custom anchors, or Let the AI decide." % (", ".join(skipped[:6]) + (" …" if len(skipped) > 6 else ""))
+	return msg, done
+
+
+class SetEditor(object):
+	"""Custom… : a named anchor set. Add any glyph (search the font's glyph names); its row shows the anchors it gets by
+	default, comma separated, to edit freely, and an empty "Place anchors as if glyph" field (the AI's reference glyph, as
+	right-click ▸ Custom anchors). Saved sets appear in the Anchors popup over Custom…"""
+	W = 640
+
+	def __init__(self, dialog, font):
+		import vanilla
+		self.dialog, self.font, self.defaults = dialog, font, {}
+		M, W = simple.Dialog.M, self.W; w = vanilla.Window((W, 470), "Custom anchors", minSize=(W, 360)); self.w = w
+		names = [str(g.name) for g in font.glyphs]
+		w.nameLabel = vanilla.TextBox((M, 15, 90, 17), "Set name")
+		w.name = vanilla.EditText((M + 96, 12, 190, 22), "", placeholder="e.g. My font", callback=lambda s: self.refresh())
+		sets = sorted(saved_sets())
+		w.openSavedLabel = vanilla.TextBox((W - M - 300, 15, 90, 17), "Open saved", alignment="right")
+		w.openSaved = vanilla.PopUpButton((W - M - 200, 12, 200, 22), ["—"] + sets, callback=self.open_)
+		w.addLabel = vanilla.TextBox((M, 51, 90, 17), "Add glyph")
+		w.glyph = vanilla.ComboBox((M + 96, 48, 250, 22), names, completes=True, callback=None)
+		w.add = vanilla.Button((M + 356, 48, 80, 22), "Add", callback=self.add_)
+		w.addSel = vanilla.Button((M + 446, 48, W - 2 * M - 446, 22), "Add selected glyphs", callback=self.addSelected_)
+		cols = [dict(title="Glyph", key="glyph", editable=False, width=120),
+		        dict(title="Anchors (comma separated)", key="anchors", editable=True),
+		        dict(title="Place anchors as if glyph", key="as", editable=True, width=170)]
+		w.rows = vanilla.List((M, 84, -M, -86), [], columnDescriptions=cols, editCallback=self.edited_, selectionCallback=lambda s: self.refresh(), enableDelete=True, drawFocusRing=False)
+		w.hint = vanilla.TextBox((M, -78, -M, 32), "Any anchor name works. Names the AI knows (top, ogonek …) and related ones (top.2, upper, low) go where they belong; others go just over top and under bottom, alternating.", sizeStyle="small")
+		w.remove = vanilla.Button((M, -38, 120, 24), "Remove row", callback=self.remove_)
+		w.delete = vanilla.Button((M + 132, -38, 120, 24), "Delete set", callback=self.delete_); w.delete.enable(False)
+		w.cancel = vanilla.Button((W - M - 250, -38, 120, 24), "Cancel", callback=self.cancel_)
+		w.save = vanilla.Button((W - M - 120, -38, 120, 24), "Save", callback=self.save_)
+		w.setDefaultButton(w.add); self.loaded = None; self.closing = False; self.clean = self.state()
+		w.bind("should close", self.should_close); self.refresh(); w.open()
+
+	def state(self):
+		return (str(self.w.name.get() or "").strip(), tuple(sorted((r["glyph"], r["anchors"], r["as"]) for r in self.items())))
+
+	def dirty(self):
+		return self.state() != self.clean
+
+	def can_save(self):
+		"""Save is possible with a name (not one of the built-in choices), at least one glyph, and a change to save."""
+		name, rows = self.state()
+		return bool(name) and name not in ("All rule anchors", "Top and bottom only", CUSTOM) and bool(rows) and self.dirty()
+
+	def refresh(self):
+		try: self.w.save.enable(self.can_save())
+		except Exception: pass
+
+	def cancel_(self, sender):
+		"""Unsaved changes: the first click warns, the second closes without saving."""
+		if self.dirty() and self.w.cancel.getTitle() != "Discard changes":
+			self.w.cancel.setTitle("Discard changes"); self.say("Your changes are not saved. Click Save to keep them, or Discard changes to close without saving."); return
+		self.close(None)
+
+	def should_close(self, sender):
+		"""The window's close button: same warning as Cancel."""
+		if self.closing or not self.dirty() or self.w.cancel.getTitle() == "Discard changes":
+			if not self.closing: self.closing = True; self.back(None)
+			return True
+		self.w.cancel.setTitle("Discard changes"); self.say("Your changes are not saved. Click Save to keep them, or Discard changes to close without saving.")
+		return False
+
+	def ask(self, rows):
+		"""The anchors the server gives these glyphs by default: [{name, as}] -> {name: "top, bottom, ogonek"}"""
+		data = []
+		for r in rows:
+			g = self.font.glyphs[r["name"]]; d = dict(name=r["name"], unicode=None, comps=[], **{"as": r.get("as") or ""})
+			if g is not None:
+				try: d["unicode"] = int(g.unicode, 16) if g.unicode else None
+				except Exception: pass
+				try: d["comps"] = [str(c.componentName) for c in g.layers[0].components]
+				except Exception: pass
+			data.append(d)
+		st, b = simple.call(dict(tool="anchors", action="defaults", key=simple.key(), simple=False, install=simple.identity(), data=dict(glyphs=data)), 30)
+		if st != 200: raise RuntimeError(b.get("error") or "The server answered %s." % st)
+		return dict((n, ", ".join(a)) for n, a in (b.get("defaults") or {}).items())
+
+	def items(self):
+		return [dict(glyph=str(r.get("glyph") or ""), anchors=str(r.get("anchors") or ""), **{"as": str(r.get("as") or "")}) for r in self.w.rows.get()]
+
+	def add_names(self, names):
+		have = set(r["glyph"] for r in self.items()); new = [n for n in names if n and n not in have]
+		missing = [n for n in new if self.font.glyphs[n] is None]
+		if missing: self.say("Not in the font: %s" % ", ".join(missing[:5])); new = [n for n in new if n not in missing]
+		if not new: return
+		try: d = self.ask([dict(name=n) for n in new])
+		except Exception as e: self.say("Error: %s" % e); return
+		for n in new:
+			self.defaults[n] = d.get(n, ""); self.w.rows.append(dict(glyph=n, anchors=d.get(n, ""), **{"as": ""}))
+		self.refresh()
+
+	def add_(self, sender):
+		self.add_names([str(self.w.glyph.get() or "").strip()]); self.w.glyph.set("")
+
+	def addSelected_(self, sender):
+		self.add_names(sorted(simple.selected_names(self.font)))
+
+	def edited_(self, sender):
+		"""A new "as if" glyph: the row gets that glyph's default anchors, unless the user changed the anchors already."""
+		self.refresh(); rows = self.items()
+		for i, r in enumerate(rows):
+			if self.defaults.get(("as", r["glyph"])) == r["as"]: continue
+			self.defaults[("as", r["glyph"])] = r["as"]
+			if r["anchors"] != self.defaults.get(r["glyph"], r["anchors"]): continue
+			try: d = self.ask([dict(name=r["glyph"], **{"as": r["as"]})])
+			except Exception: continue
+			self.defaults[r["glyph"]] = d.get(r["glyph"], ""); r["anchors"] = d.get(r["glyph"], "")
+			self.w.rows[i] = r
+		self.refresh()
+
+	def remove_(self, sender):
+		for i in sorted(self.w.rows.getSelection(), reverse=True): del self.w.rows[i]
+		self.refresh()
+
+	def open_(self, sender):
+		i = sender.get()
+		if i == 0: return
+		name = sorted(saved_sets())[i - 1]; rows = saved_sets().get(name) or {}
+		self.w.name.set(name); self.loaded = name; self.w.delete.enable(True)
+		self.w.rows.set([dict(glyph=g, anchors=", ".join(r.get("anchors") or []), **{"as": r.get("as") or ""}) for g, r in sorted(rows.items())])
+		for g, r in rows.items(): self.defaults[g] = ", ".join(r.get("anchors") or []); self.defaults[("as", g)] = r.get("as") or ""
+		self.clean = self.state(); self.w.cancel.setTitle("Cancel"); self.refresh()
+
+	def delete_(self, sender):
+		if self.loaded is None: return
+		if self.w.delete.getTitle() != "Yes, delete":
+			self.w.delete.setTitle("Yes, delete"); self.say("Delete the set %s? Click again to delete it." % self.loaded); return
+		sets = saved_sets(); sets.pop(self.loaded, None); save_sets(sets); self.close(None)
+
+	def save_(self, sender):
+		name = str(self.w.name.get() or "").strip()
+		if not name: self.say("Give the set a name."); return
+		if name in ("All rule anchors", "Top and bottom only", CUSTOM): self.say("Choose another name."); return
+		rows = dict((r["glyph"], dict(anchors=[a.strip() for a in r["anchors"].split(",") if a.strip()], **{"as": r["as"].strip()})) for r in self.items())
+		if not rows: self.say("Add at least one glyph."); return
+		sets = saved_sets()
+		if self.loaded and self.loaded != name: sets.pop(self.loaded, None)
+		sets[name] = rows; save_sets(sets); self.close(name)
+
+	def say(self, text):
+		self.w.hint.set(text)
+
+	def close(self, chosen):
+		self.closing = True
+		try: self.w.close()
+		except Exception: pass
+		self.back(chosen)
+
+	def back(self, chosen):
+		"""Back to the AI Anchors dialog: the saved set chosen in its Anchors popup (or the previous choice)."""
+		d = self.dialog
+		Glyphs.defaults[PREFS + "which"] = chosen or d.previous_which
+		d.options = options(); d.build(); d.w.open()
+
+
+simple.register("anchors", anchors, OPTIONS, extra=("reset", "treat_as"))                 # scripts and the Glyphs MCP server: MansAITools.anchors(…)
 
 
 class AIAnchors(GeneralPlugin):
@@ -123,7 +320,8 @@ class AIAnchors(GeneralPlugin):
 	def ctx_run(self, **kw):
 		try:
 			msg, names = simple.result_parts(anchors(targets=self.targets(), **kw))
-			if simple.Dialog.pref_of("com.mansgreback.AIAnchors.", "tab", True): simple.open_tab(Glyphs.font, names)
+			if Glyphs.font.currentTab is None and simple.Dialog.pref_of("com.mansgreback.AIAnchors.", "tab", True):   # right-click in an edit tab: stay in it, no new tab
+				simple.open_tab(Glyphs.font, names)
 		except Exception as e:
 			traceback.print_exc(); log("CTX ERROR", traceback.format_exc()); msg = "Error: %s" % (str(e)[:300] or "see Macro panel output.")
 		try: Glyphs.showNotification(simple.BRAND, msg)
@@ -157,9 +355,19 @@ class AIAnchors(GeneralPlugin):
 
 	def openDialog_(self, sender):
 		try:
-			self.dlg = simple.Dialog(TITLE, BRIEF, "Place", anchors, about=ABOUT, options=OPTIONS, prefs="com.mansgreback.AIAnchors."); self.dlg.open()
+			self.dlg = simple.Dialog(TITLE, BRIEF, "Place", anchors, about=ABOUT, options=options(), prefs=PREFS, hooks=dict(which=self.which_changed), when=WHEN)
+			self.dlg.previous_which = simple.Dialog.pref_of(PREFS, "which", "All rule anchors"); self.dlg.open()
 		except Exception:
 			traceback.print_exc(); log("DIALOG ERROR", traceback.format_exc())
+
+	@objc.python_method
+	def which_changed(self, dialog, value):
+		"""The Anchors popup: Custom… opens the set editor; any other choice is remembered as the one to go back to."""
+		if value != CUSTOM:
+			dialog.previous_which = value; return
+		try: self.editor = SetEditor(dialog, Glyphs.font)
+		except Exception:
+			traceback.print_exc(); log("SET EDITOR ERROR", traceback.format_exc()); dialog.set_option("which", dialog.previous_which)
 
 	@objc.python_method
 	def __file__(self):

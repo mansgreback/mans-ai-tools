@@ -24,14 +24,14 @@ import simple
 from simple import log
 
 TITLE = "AI Variable Font"
-ABOUT = "AI Variable Font makes a variable font for you, from a single style font, with every node kept so the masters stay compatible. The full version does everything, unlimited: the whole font, your choice of axes, composites kept as components."
-BRIEF = "Makes a new variable font (Weight, Width) from the current master. A–Z a–z only."
+ABOUT = "AI Variable Font makes a variable font for you from a single-style font, with every node kept so that the masters stay compatible. The full version does the whole font, unlimited, with your choice of axes, and glyphs made of components stay components."
+BRIEF = "Makes a new variable font from the current master."
 WEIGHTS = [(100, "Thin"), (300, "Light"), (400, "Regular"), (700, "Bold"), (900, "Black")]
 WIDTHS = [(75, "Condensed"), (87.5, "SemiCondensed"), (100, ""), (112.5, "SemiExtended"), (125, "Extended")]
 ALL_WEIGHTS = [(100, "Thin"), (200, "ExtraLight"), (300, "Light"), (400, "Regular"), (500, "Medium"), (600, "SemiBold"), (700, "Bold"), (800, "ExtraBold"), (900, "Black")]
 
 
-OPTIONS = [("check", "weight", "Weight axis", True), ("check", "width", "Width axis", True), ("check", "tab", "Open the glyphs in a new tab", True)]
+OPTIONS = [("check", "weight", "Weight axis", True), ("check", "width", "Width axis", True)]   # no new-tab option: the result is a new font of its own
 
 
 def font_json(font, master, weight=True, width=True):
@@ -47,7 +47,7 @@ def font_json(font, master, weight=True, width=True):
 		empty = not simple.closed_paths(layer) and not len(list(layer.components)) and not len(list(layer.paths))
 		glyphs.append(dict(name=str(g.name), unicode=uni, width=float(layer.width), empty=bool(empty),
 		                   paths=[[[float(n.position.x), float(n.position.y), str(n.type)] for n in p.nodes] for p in simple.closed_paths(layer)]))
-	return dict(upm=float(font.upm), cap=float(master.capHeight or 0), grid=float(font.grid), family=str(font.familyName), weight=bool(weight), width=bool(width), glyphs=glyphs)
+	return dict(upm=float(font.upm), cap=simple.metric(font, master, "capHeight", ("H", "I", "E"), 0.7), grid=float(font.grid), family=str(font.familyName), weight=bool(weight), width=bool(width), glyphs=glyphs)
 
 
 def set_axes(font, tags):
@@ -145,7 +145,7 @@ def settle_alignment(font_):
 def make(opts=None):
 	opts = opts or {}; weight = bool(opts.get("weight", True)); width = bool(opts.get("width", True))
 	if not weight and not width: raise RuntimeError("Choose at least one axis.")
-	font = Glyphs.font; master = font.selectedFontMaster or font.masters[0]
+	font, master = simple.target()
 	try: open(simple.LOG, "w").close()
 	except Exception: pass
 	log("start", TITLE, font.familyName, "master", master.name, "Glyphs", Glyphs.versionNumber, Glyphs.buildNumber)
@@ -204,10 +204,16 @@ def make(opts=None):
 	fam = (str(font.familyName) or "Font").replace("/", "-")
 	path = os.path.join(tempfile.mkdtemp(prefix="makevariable_"), fam + " Variable.glyphs")
 	try:
-		new.save(path, formatVersion=3); Glyphs.open(path); log("opened from file", path)
+		new.save(path, formatVersion=3)
+		if not simple.on_main_thread():                                  # a script / the MCP server: Glyphs opens windows only on the main thread
+			log("saved", path); return "%d masters: %s, %d glyphs. Saved to %s" % (len(out["masters"]), ", ".join(m["name"] for m in out["masters"]), len(data["glyphs"]), path), [g["name"] for g in data["glyphs"]]
+		Glyphs.open(path); log("opened from file", path)
 	except Exception:
 		log("save/open failed, appending instead", traceback.format_exc()); Glyphs.fonts.append(new)
 	return "%d masters: %s, %d glyphs." % (len(out["masters"]), ", ".join(m["name"] for m in out["masters"]), len(data["glyphs"])), [g["name"] for g in data["glyphs"]]
+
+
+simple.register("variable", make, OPTIONS)                 # scripts and the Glyphs MCP server: MansAITools.variable(…)
 
 
 class AIVariable(GeneralPlugin):
