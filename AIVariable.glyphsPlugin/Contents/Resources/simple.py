@@ -13,8 +13,7 @@ PREF_SERVER = "com.mansgreback.MansTools.server"
 PREF_KEY = "com.mansgreback.MansTools.key"                  # one key for all Måns AI Tools plugins (the full plugins use the same)            # defaults write com.GeorgSeifert.Glyphs4 com.mansgreback.MansTools.server http://127.0.0.1:5720/api
 BRAND = "Måns AI Tools"
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-CAUTION = ("Save a copy of your work before running this. Font and install data will be sent to, stored and processed on the "
-           "aringtypeface.com server. Internet access is required. Do not submit any confidential or protected work, nor work you do not own.")
+CAUTION = ("Save a copy of your work first. Font data is sent to the aringtypeface.com server; see Privacy and Terms in the manual.")
 LOG = os.path.join(tempfile.gettempdir(), "MansToolsSimple.log")
 
 
