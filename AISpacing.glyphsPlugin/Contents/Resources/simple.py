@@ -132,7 +132,8 @@ def identity():
 	try:
 		from Foundation import NSUserDefaults
 		d = NSUserDefaults.standardUserDefaults()
-		blob = d.objectForKey_("User3"); paddle = d.objectForKey_("Paddle-Glyphs 3-650121-SD")
+		blob = d.objectForKey_("User3") or d.objectForKey_("User4")   # User4 = Glyphs 4 bought without Glyphs 3 (2026-11-16)
+		paddle = d.objectForKey_("Paddle-Glyphs 3-650121-SD")
 		if blob: out["glyphs_hash"] = hashlib.sha256(bytes(blob)).hexdigest()
 		elif paddle: out["glyphs_hash"] = hashlib.sha256(str(paddle).encode()).hexdigest()
 	except Exception:
