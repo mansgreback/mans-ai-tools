@@ -35,7 +35,7 @@ Entries for `packages.plist` in https://github.com/schriftgestalt/glyphs-package
 				url = "https://github.com/mansgreback/mans-ai-tools";
 				path = "AIAnchors.glyphsPlugin";
 				descriptions = {
-					en = "Places your anchors for you. Free: top and bottom on A–Z a–z; the full version does any Latin glyph — letters, accents and combining marks, ogonek, center, topright and topleft — plus a right-click menu to set, reset or custom-place anchors on any glyph. Needs the vanilla module and internet access: the model runs on a server. One license unlocks all Måns AI Tools plugins.";
+					en = "Places your anchors for you. Free: top and bottom on A–Z a–z; the full version does letters of every script, accents and combining marks, ogonek, center, topright and topleft — plus a right-click menu to set, reset or custom-place anchors on any glyph. Needs the vanilla module and internet access: the model runs on a server. One license unlocks all Måns AI Tools plugins.";
 				};
 				screenshot = "https://raw.githubusercontent.com/mansgreback/mans-ai-tools/main/screenshots/anchors.png";
 				minVersion = 3300;

@@ -54,9 +54,12 @@ def check_tier(tool="anchors", move=False):
 	server's code ("tied" = the licence is active on another computer; a second call with move=True moves it here for good)."""
 	k = key(); TIER["code"] = ""
 	if not k:
-		TIER.update(tier="free", msg=""); return "free"
+		TIER.update(tier="free", msg="")
+		try: TIER["latest"] = str(call(dict(tool=tool, action="status"), 10)[1].get("latest") or "")   # only for the update notice
+		except Exception: pass
+		return "free"
 	st, b = call(dict(tool=tool, action="status", key=k, install=identity(), move=bool(move)), 30)
-	TIER["code"] = str(b.get("code") or "")
+	TIER["code"] = str(b.get("code") or ""); TIER["latest"] = str(b.get("latest") or "")
 	if st == 200 and b.get("tier") == "full": TIER.update(tier="full", msg="", kind=str(b.get("kind") or "pro"), days=b.get("days_left"))
 	elif st == 0: TIER.update(tier="free", msg=b.get("error") or "The server could not be reached.")
 	elif TIER["code"] == "expired": TIER.update(tier="free", msg="This demo license has expired. Running as the free version.")
@@ -65,19 +68,39 @@ def check_tier(tool="anchors", move=False):
 	return TIER["tier"]
 
 
-def version_text():
-	"""This plugin's version as shown in the dialog: 1.0.0 -> v1.000 (from the bundle's Info.plist)."""
+def version_parts(v=None):
+	"""1.1.0 -> (1, 1, 0); None = this plugin's own version (CFBundleShortVersionString of the bundle's Info.plist)."""
 	try:
-		import plistlib
-		with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Info.plist"), "rb") as f:
-			p = str(plistlib.load(f).get("CFBundleShortVersionString") or "").split(".")
-		return "v%s.%d%02d" % (p[0], int(p[1]) if len(p) > 1 else 0, int(p[2]) if len(p) > 2 else 0)
+		if v is None:
+			import plistlib
+			with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Info.plist"), "rb") as f:
+				v = plistlib.load(f).get("CFBundleShortVersionString")
+		p = [int(x) for x in str(v or "").split(".") if x.strip().isdigit()]
+		return tuple((p + [0, 0, 0])[:3]) if p else None
 	except Exception:
-		return ""
+		return None
+
+
+def version_text(v=None):
+	"""A version as shown in the dialog: 1.0.0 -> v1.000; None = this plugin's own."""
+	p = version_parts(v)
+	return "v%d.%d%02d" % p if p else ""
+
+
+def update_text():
+	"""-> "Update available: v1.200" when the server names a newer release than this plugin, else "" """
+	mine, new = version_parts(), version_parts(TIER.get("latest"))
+	return "Update available: %s" % version_text(TIER["latest"]) if mine and new and new > mine else ""
 
 
 def status_line():
-	"""-> (text, the part to show bold or ""): Måns Tools v1.000 · Professional / Student / Demo: expires in 23 days / Free Version"""
+	"""-> (text, the part to show bold or ""): Måns Tools v1.000 · Professional / Student / Demo: expires in 23 days / Free Version,
+	then " · Update available: v1.200" (bold) when the server names a newer release"""
+	text, bold = license_line(); upd = update_text()
+	return (text + " · " + upd, upd) if upd else (text, bold)
+
+
+def license_line():
 	head = ("Måns Tools " + version_text()).strip() + " · "
 	if TIER["tier"] != "full": return head + "Free Version", ""
 	kind = TIER.get("kind") or "pro"
@@ -225,6 +248,7 @@ def register(name, fn, options, extra=()):
 	the selected one), glyphs = glyph names to work on instead of the selection. Returns (message, names of the adjusted glyphs).
 	The free version works on A–Z a–z with the defaults, as in the dialog. MansAITools.API lists the tools."""
 	defaults = dict((k, d[1] if isinstance(d, tuple) else d) for _, k, _, d in options)
+	choices = dict((k, d[0]) for kind, k, _, d in options if kind in ("popup", "radio"))
 
 	def call(font=None, master=None, glyphs=None, **opts):
 		kw = dict((k, opts.pop(k)) for k in list(opts) if k in extra)
@@ -233,7 +257,7 @@ def register(name, fn, options, extra=()):
 		o = dict(defaults); o.update(opts)
 		if glyphs is not None:
 			glyphs = [str(n) for n in ([glyphs] if isinstance(glyphs, str) else glyphs)]
-			if "scope" in o: o["scope"] = "Selected glyphs"
+			if "scope" in o and o["scope"] == defaults["scope"]: o["scope"] = choices["scope"][1]   # glyphs given and no selection mode chosen: the tool's first selection mode
 		CALL.clear(); CALL.update(font=font, master=master, glyphs=glyphs)
 		try:
 			if TIER["tier"] != "full" and key(): check_tier(name)                 # a script may run before the plugin's own check came back

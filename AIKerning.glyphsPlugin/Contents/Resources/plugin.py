@@ -26,7 +26,12 @@ ABOUT = "AI Kerning kerns your font for you. The full version kerns the whole fo
 BRIEF = "Kerns the current master."
 
 
-OPTIONS = [("radio", "scope", "Kern", (["All glyphs", "Selected glyphs"], "All glyphs")),                 # inputs, then checkboxes, then grouping with its own inputs
+ALL, AGAINST, ONLY = "All glyphs", "Selected against all", "Selected only"      # every pair / the selection against every glyph / the selection against itself
+BOTH, LEFT, RIGHT = "Both", "Left", "Right"                              # the selected glyph's own side: Left = its left edge (VA), Right = its right edge (AV)
+LEGACY = {"Selected glyphs": AGAINST}                                     # v1.000's choice, from saved settings and scripts
+
+OPTIONS = [("popup", "scope", "Kern", ([ALL, AGAINST, ONLY], ALL)),                         # inputs, then checkboxes, then grouping with its own inputs
+           ("popup", "sides", "Sides", ([BOTH, LEFT, RIGHT], BOTH)),
            ("radio", "accents", "Accented glyphs", (["Kern individually", "Inherit base"], "Kern individually")),
            ("text", "strength", "Strength %", "100"),
            ("text", "threshold", "Skip adjustments under", "5"),
@@ -37,7 +42,8 @@ OPTIONS = [("radio", "scope", "Kern", (["All glyphs", "Selected glyphs"], "All g
            ("text", "tolerance", "Group tolerance", "5"),
            ("text", "exceptions", "Exceptions %", "5"),
            ("check", "tab", "Open the kerned glyphs in a new tab", True)]
-WHEN = dict(keep=lambda v: v.get("group"), tolerance=lambda v: v.get("group"), exceptions=lambda v: v.get("group"))   # grouping off: these do nothing
+WHEN = dict(sides=lambda v: v.get("scope") == AGAINST,                  # only "Selected against all" has sides: the other two kern both anyway
+            keep=lambda v: v.get("group"), tolerance=lambda v: v.get("group"), exceptions=lambda v: v.get("group"))   # grouping off: these do nothing
 
 
 def kern(opts=None):
@@ -50,7 +56,9 @@ def kern(opts=None):
 	opts = opts or {}; settings = {}
 	if simple.TIER["tier"] == "full":
 		num = lambda k, d: float(str(opts.get(k, d)).replace(",", ".") or d)
-		settings = dict(scope="selected" if opts.get("scope") == "Selected glyphs" else "all", uc=bool(opts.get("uc", True)), lc=bool(opts.get("lc", True)),
+		scope = LEGACY.get(opts.get("scope"), opts.get("scope")); side = opts.get("sides")
+		settings = dict(scope="selected" if scope in (AGAINST, ONLY) else "all", pairs="among" if scope == ONLY else "all",
+		                sides="right" if (scope == AGAINST and side == LEFT) else "left" if (scope == AGAINST and side == RIGHT) else "both", uc=bool(opts.get("uc", True)), lc=bool(opts.get("lc", True)),
 		                fig=bool(opts.get("fig", True)), punct=bool(opts.get("punct", True)), accents="inherit" if str(opts.get("accents", "")).startswith("Inherit") else "individual",
 		                fill=bool(opts.get("fill", False)), strength=num("strength", 100) / 100.0, group=bool(opts.get("group", True)), keep_groups=bool(opts.get("keep", False)),
 		                tolerance=num("tolerance", 5), exceptions=num("exceptions", 5), threshold=num("threshold", 5))
@@ -117,6 +125,13 @@ class AIKerning(GeneralPlugin):
 
 	def openDialog_(self, sender):
 		try:
+			try:                                                         # v1.000 saved "Selected glyphs": the same thing is now "Selected against all"
+				old = Glyphs.defaults["com.mansgreback.AIKerning.scope"]
+				if old in LEGACY: Glyphs.defaults["com.mansgreback.AIKerning.scope"] = LEGACY[old]
+				elif old is None and simple.TIER["tier"] == "full":        # the full version's first dialog starts on "Selected only" (Mans 2026-11-22); scripts keep All glyphs
+					Glyphs.defaults["com.mansgreback.AIKerning.scope"] = ONLY
+			except Exception:
+				pass
 			self.dlg = simple.Dialog(TITLE, BRIEF, "Kern", kern, about=ABOUT, options=OPTIONS, prefs="com.mansgreback.AIKerning.", when=WHEN); self.dlg.open()
 		except Exception:
 			traceback.print_exc(); log("DIALOG ERROR", traceback.format_exc())

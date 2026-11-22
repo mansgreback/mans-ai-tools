@@ -9,7 +9,7 @@ import os, sys, traceback
 
 import objc
 from Foundation import NSMakePoint
-from GlyphsApp import Glyphs, GSAnchor
+from GlyphsApp import Glyphs, GSAnchor, GSGlyph
 from GlyphsApp.plugins import GeneralPlugin
 
 try:
@@ -30,14 +30,80 @@ BRIEF = "Places anchors in the current master."
 BASIC = "A–Z, a–z, marks"
 CUSTOM = "Custom…"
 AI_DECIDES = "Let the AI decide"
-WHEN = dict(snap_units=lambda v: v.get("snap_on"))           # rows shown only when they have an effect
+WHEN = dict(snap_units=lambda v: v.get("snap_on"), dotless=lambda v: v.get("scope") == BASIC)           # rows shown only when they have an effect
 PREFS = "com.mansgreback.AIAnchors."
 OPTIONS = [("radio", "scope", "Place on", ([BASIC, "Selected glyphs"], BASIC)),
            ("popup", "which", "Anchors", (["All rule anchors", "Top and bottom only", AI_DECIDES, CUSTOM], "All rule anchors")),
            ("check", "replace", "Replace anchors that already exist", True),
            ("check", "snap_on", "Snap height to baseline, x-height or cap height", False),
            ("text", "snap_units", "Snap within (units)", "20"),
+           ("check", "dotless", "Make idotless and jdotless if missing", False),
            ("check", "tab", "Open the anchored glyphs in a new tab", True)]
+
+
+DOTLESS = (("idotless", "i", "0131", "dotlessi"), ("jdotless", "j", "0237", "dotlessj"))
+
+
+def is_dotless(glyph):
+	"""idotless / jdotless, by name (also the old spellings) or by code point."""
+	try: return str(glyph.name) in ("idotless", "jdotless", "dotlessi", "dotlessj") or str(glyph.unicode or "").upper() in ("0131", "0237")
+	except Exception: return False
+
+
+def find_dotless(font, row):
+	name, _, uni, old = row
+	for g in font.glyphs:
+		if str(g.name) in (name, old) or str(g.unicode or "").upper() == uni: return g
+	return None
+
+
+def without_dot(layer):
+	"""The outlines of an i or j without its dot, as copies: the outlines are put in groups that overlap in height, and the top
+	group goes if it is clearly separate from the rest and small. -> list of paths, or None when no dot can be told apart."""
+	L = layer
+	try:
+		if len(list(layer.components)): L = layer.copyDecomposedLayer()
+	except Exception: pass
+	paths = [p for p in L.paths if p.closed]
+	if len(paths) < 2: return None
+	box = lambda p: (p.bounds.origin.y, p.bounds.origin.y + p.bounds.size.height)
+	groups = []
+	for p in sorted(paths, key=lambda q: box(q)[0]):
+		lo, hi = box(p)
+		if groups and lo <= groups[-1][1]:
+			groups[-1][1] = max(groups[-1][1], hi); groups[-1][2].append(p)
+		else:
+			groups.append([lo, hi, [p]])
+	if len(groups) < 2: return None
+	total = groups[-1][1] - groups[0][0]
+	if total <= 0 or (groups[-1][1] - groups[-1][0]) > 0.4 * total: return None    # too tall for a dot
+	return [p.copy() for g in groups[:-1] for p in g[2]]
+
+
+def make_dotless(font):
+	"""Makes the missing idotless / jdotless from i / j in every master: same outlines without the dot, same width and kerning
+	groups. i and j are not changed. -> (names made, [(name, why not)])"""
+	made, failed = [], []
+	for row in DOTLESS:
+		name, base, uni, _ = row
+		if find_dotless(font, row) is not None: continue
+		src = font.glyphs[base]
+		if src is None:
+			failed.append((name, "the font has no %s" % base)); continue
+		parts = {}
+		for m in font.masters:
+			L = src.layers[m.id]; kept = without_dot(L) if L is not None else None
+			if not kept: break
+			parts[m.id] = (kept, L.width)
+		if len(parts) != len(font.masters):
+			failed.append((name, "no separate dot in %s" % base)); continue
+		g = GSGlyph(name); font.glyphs.append(g); g = font.glyphs[name]
+		g.unicode = uni; g.leftKerningGroup = src.leftKerningGroup; g.rightKerningGroup = src.rightKerningGroup
+		for mid, (kept, width) in parts.items():
+			nl = g.layers[mid]; nl.width = width
+			for p in kept: nl.shapes.append(p)
+		made.append(name)
+	return made, failed
 
 
 def units(text):
@@ -73,7 +139,7 @@ def anchors(opts=None, targets=None, replace=None, reset=False, treat_as=None):
 	font, master = simple.target()
 	try: open(simple.LOG, "w").close()
 	except Exception: pass
-	full = simple.TIER["tier"] == "full"; opts = opts or {}
+	full = simple.TIER["tier"] == "full"; opts = opts or {}; made_dotless = []; failed_dotless = []
 	if targets is not None:
 		if not full: raise RuntimeError("The full version is needed for this.")
 		glyphs = [g for g in targets if g.layers[master.id] is not None and simple.closed_paths(g.layers[master.id], True)]
@@ -81,14 +147,16 @@ def anchors(opts=None, targets=None, replace=None, reset=False, treat_as=None):
 		for k, d in (("which", "All rule anchors"), ("snap_on", False), ("snap_units", "20")):   # the dialog's remembered settings apply
 			opts.setdefault(k, simple.Dialog.pref_of("com.mansgreback.AIAnchors.", k, d))
 	else:
+		if full and opts.get("scope") != "Selected glyphs" and opts.get("dotless"):
+			made_dotless, failed_dotless = make_dotless(font)
 		glyphs = simple.worked(font, master, components=True)                 # composites (d = b + …, Aacute) count by their decomposed outlines
 		if full and opts.get("scope") == "Selected glyphs":                   # any glyph; one in no rule list gets a reference glyph's anchor set (Aacute → A, ampersand → E)
 			sel = simple.selected_names(font); glyphs = [g for g in glyphs if str(g.name) in sel]
 			if not glyphs: raise RuntimeError("Select the glyphs first (with outlines or components).")
-		elif full:                                                             # A–Z, a–z and the marks (acutecomb, dieresis …), and the glyphs of a chosen custom set
+		elif full:                                                             # the letters of every script, the marks (acutecomb, dieresis …), and the glyphs of a chosen custom set (Mans 2026-11-22: no script left out)
 			mine = saved_sets().get(str(opts.get("which") or "")) or {}
-			glyphs = [g for g in glyphs if simple.is_letter(g) or str(g.category or "") == "Mark" or str(g.name) in mine]
-		if not glyphs: raise RuntimeError("None of A–Z a–z has outlines in this master.")
+			glyphs = [g for g in glyphs if str(g.category or "") in ("Letter", "Mark") or is_dotless(g) or str(g.name) in mine]
+		if not glyphs: raise RuntimeError("No letters or marks have outlines in this master." if full else "None of A–Z a–z has outlines in this master.")
 	log("start", TITLE, font.familyName, master.name, len(glyphs), "glyphs", "as", treat_as, "reset", reset)
 	if replace is None: replace = bool(opts.get("replace", True)) if full else True
 	settings = dict(anchors={"Top and bottom only": "topbottom", AI_DECIDES: "ai"}.get(opts.get("which"), "all"), ai=opts.get("which") == AI_DECIDES, snap=bool(opts.get("snap_on", False)), snap_units=units(opts.get("snap_units", "20")),
@@ -119,6 +187,11 @@ def anchors(opts=None, targets=None, replace=None, reset=False, treat_as=None):
 	log("applied", n, "added", moved, "moved")
 	r = answer["result"] or {}; refs = r.get("refs") or {}; skipped = r.get("skipped") or []
 	msg = "%d anchors added, %d moved, in %s." % (n, moved, master.name)
+	if made_dotless: msg += " Made %s." % " and ".join(made_dotless)
+	if failed_dotless: msg += " Could not make %s." % "; ".join("%s (%s)" % kv for kv in failed_dotless)
+	if full and targets is None and opts.get("scope") != "Selected glyphs":
+		missing = [row[0] for row in DOTLESS if find_dotless(font, row) is None and row[0] not in dict(failed_dotless)]
+		if missing: msg += " Recommended: create %s before running, or tick Make idotless and jdotless." % " and ".join(missing)
 	if refs: msg += " As their reference glyph: %s." % ", ".join("%s as %s" % kv for kv in sorted(refs.items())[:6]) + (" …" if len(refs) > 6 else "")
 	if skipped: msg += " No reference for %s: use Custom anchors, or Let the AI decide." % (", ".join(skipped[:6]) + (" …" if len(skipped) > 6 else ""))
 	return msg, done
