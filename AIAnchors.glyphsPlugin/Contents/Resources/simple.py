@@ -200,13 +200,37 @@ def call(body, timeout=900):
 
 
 def run(tool, data, timeout=900):
-	"""One run on the server: no key, simple=True (the server works on A–Z a–z only and says so). -> result dict; raises with the server's message."""
+	"""One run on the server: no key, simple=True (the server works on A–Z a–z only and says so). -> result dict; raises with the server's message.
+	The run goes on in the background on the server (the host's gateway cuts any request after about a minute): the server
+	answers at once with a job number, and the plugin asks for the answer every few seconds until it is there."""
 	k = key() if TIER["tier"] == "full" else ""                      # a valid key: the full version (every glyph, no limit); else the simple run
-	st, b = call(dict(tool=tool, action="run", key=k, simple=not k, install=identity(), data=data), timeout)
-	log("server", tool, st, b.get("code"), b.get("tier"), b.get("error"))
+	ident = identity()
+	st, b = call(dict(tool=tool, action="run", key=k, simple=not k, install=ident, data=data, background=True), timeout)
+	log("server", tool, st, b.get("code"), b.get("tier"), b.get("error"), b.get("job"))
+	if st == 202 and b.get("job"):
+		st, b = wait_job(tool, b["job"], k, ident)
+		log("server", tool, "job", st, b.get("code"), b.get("error"))
 	if st != 200:
 		raise RuntimeError(b.get("error") or "The server answered %s." % st)
 	return b
+
+
+def wait_job(tool, job, k, ident, most=1500):
+	"""Asks the server for a background job until it is done (the dialog's spinner keeps turning meanwhile). -> (status, body).
+	A few failed asks in a row (a dropped connection, a busy host) are retried."""
+	t0 = time.time(); pause = 1.0; misses = 0
+	while True:
+		time.sleep(pause); pause = min(pause + 0.5, 3.0)
+		st, b = call(dict(tool=tool, action="job", job=job, key=k, install=ident), 30)
+		if st == 202:
+			misses = 0
+		elif st in (0, 429, 500, 502, 503, 504) and b.get("code") not in ("died", "server", "input"):
+			misses += 1
+			if misses > 10: return st, b
+		else:
+			return st, b
+		if time.time() - t0 > most:
+			return 504, dict(error="The server did not finish the run in time.")
 
 
 def stamp(font, what, title, answer):
@@ -298,8 +322,9 @@ def on_main_thread():
 		return True
 
 
-import sys as _sys
+import sys as _sys, types as _types
 _sys.modules.setdefault("MansAITools", _sys.modules[__name__])
+_OPEN = _sys.modules.setdefault("_mans_ai_tools_open", _types.ModuleType("_mans_ai_tools_open"))   # the open dialog, shared by every plugin's copy of this file
 
 
 def selected_names(font):
@@ -376,6 +401,18 @@ def font_json(font, master, glyphs, settings=None, components=False):
 FULL = "One license, bought once, unlocks all Måns AI Tools plugins: AI Kerning, AI Spacing, AI Anchors and AI Variable Font."
 
 
+def note_color():
+	"""Dark amber on the light window (about 5:1 contrast), the system yellow in dark mode."""
+	from AppKit import NSColor
+	light = NSColor.colorWithSRGBRed_green_blue_alpha_(0.54, 0.35, 0.0, 1.0)
+	try:
+		from AppKit import NSAppearanceNameAqua, NSAppearanceNameDarkAqua
+		dark = NSColor.systemYellowColor()
+		return NSColor.colorWithName_dynamicProvider_(None, lambda ap: dark if ap.bestMatchFromAppearancesWithNames_([NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) == NSAppearanceNameDarkAqua else light)
+	except Exception:
+		return light
+
+
 class Dialog(object):
 	"""The one window of every simple plugin, a stack of rows:
 	  title · one-line brief · status line · "Settings ▾" · option rows · button row · "About ▸" "License key"; open About ends with a "More info" link to the buy page.
@@ -384,8 +421,10 @@ class Dialog(object):
 	Buy is gone, License key stays (Remove key there), Close / action are two equal buttons. "Settings" folds the option rows away (remembered). The callback gets the option values as a dict. Messages go to the status line."""
 	W = 440; M = 16; GAP = 24
 
-	def __init__(self, title, brief, action, callback, about="", options=(), prefs="", hooks=None, when=None):
+	def __init__(self, title, brief, action, callback, about="", options=(), prefs="", hooks=None, when=None, check=None, info=None):
+		self.info = info                                                     # info(option values) -> a grey line over the buttons (AI Kerning: the most pairs)
 		self.title, self.brief, self.action, self.callback, self.options, self.prefs = title, brief, action, callback, list(options), prefs
+		self.check = check; self.warned = None                              # check(option values) -> a warning before a long run ("" = none); shown once, the next click runs
 		self.when = when or {}                                               # option name -> function(current values): show the row only when it has an effect
 		self.hooks = hooks or {}                                             # option name -> function(dialog, value), called when a popup changes (full version)
 		self.about_text = (about + "\n\n" + FULL + "\n\n" + CAUTION).strip(); self.shown = False; self.w = None
@@ -411,6 +450,12 @@ class Dialog(object):
 			except Exception: pass
 		w = vanilla.Window((W, 10), self.title); self.w = w
 		w.msg = vanilla.TextBox((M, 0, -M, 32), "", sizeStyle="small"); show_status(w.msg)          # Måns Tools v1.000 · Professional, or a message
+		w.info = vanilla.TextBox((M, 0, -M, 17), "", sizeStyle="small"); w.info.show(bool(self.info))
+		try: w.info.getNSTextField().setTextColor_(NSColor.secondaryLabelColor())
+		except Exception: pass
+		w.note = vanilla.TextBox((M, 0, -M, 10), "", sizeStyle="small"); w.note.show(False); self.note_h = 0   # a note before a long run, right over the buttons, amber
+		try: w.note.getNSTextField().setTextColor_(note_color())
+		except Exception: pass
 		# the options: a group of rows, live in the full version, shown but disabled (grey) in the free version, never read there
 		self.controls = {}; y = 0; grey = []; self.rows = []                # rows: (name, [(control, y offset)], height); shown or hidden by self.when
 		w.opts = vanilla.Group((0, 0, W, 10)); ch = self.changed_
@@ -452,6 +497,9 @@ class Dialog(object):
 			w.buy = vanilla.Button((M, 0, bw, 24), "Buy full version", callback=self.buy_)
 			w.close_ = vanilla.Button((M + bw + self.GAP, 0, bw, 24), "Close", callback=self.close_)
 			w.go = vanilla.Button((M + 2 * (bw + self.GAP), 0, bw, 24), self.action, callback=self.go_)
+		w.spin = vanilla.ProgressSpinner((0, 0, 16, 16), displayWhenStopped=False, sizeStyle="small")   # turns while the server works: Glyphs is busy, not frozen
+		try: w.spin.getNSProgressIndicator().setUsesThreadedAnimation_(True)
+		except Exception: pass
 		w.about = vanilla.Button((0, 0, 90, 20), "About ▸", sizeStyle="small", callback=self.about_)
 		if self.options: w.settings = vanilla.Button((0, 0, 100, 20), "", sizeStyle="small", callback=self.settings_)
 		w.licence = vanilla.Button((0, 0, 100, 20), "License key", sizeStyle="small", callback=self.licence_)     # both tiers: activate, or remove the key
@@ -459,6 +507,9 @@ class Dialog(object):
 		w.more = vanilla.Button(((W - 90) / 2.0, 0, 90, 20), "More info", sizeStyle="small", callback=self.buy_); w.more.show(False)   # under About: the same page, same tracking
 		self.shown = False; self.opts_shown = bool(self.pref("_settings", True))
 		self.layout(); w.setDefaultButton(w.go)
+		if self.info:
+			w.bind("became key", lambda sender: self.refresh_info())              # back from Glyphs: the selection may have changed
+			self.refresh_info()
 
 	def hook(self, name, items):
 		f = self.hooks.get(name)
@@ -493,6 +544,7 @@ class Dialog(object):
 	def changed_(self, sender):
 		try:
 			if self.when and self.w is not None: self.place_rows(); self.layout()
+			self.refresh_info()
 		except Exception:
 			log("changed", traceback.format_exc())
 
@@ -511,9 +563,13 @@ class Dialog(object):
 		w.opts.show(show)
 		if show: w.opts.setPosSize((0, y, W, self.h_opts)); y += self.h_opts
 		y += 6
+		if self.info: w.info.setPosSize((M, y + 2, -M, 17)); y += 22          # the most pairs, right over the buttons (and the note)
+		nh = getattr(self, "note_h", 0); w.note.show(nh > 0)                # the note before a long run: right over the buttons
+		if nh: w.note.setPosSize((M, y + 2, -M, nh)); y += nh + 8
 		for b in ("buy", "close_", "go"):
 			if hasattr(w, b):
 				x, _, bw, bh = getattr(w, b).getPosSize(); getattr(w, b).setPosSize((x, y, bw, bh))
+		gx, _, gw, _ = w.go.getPosSize(); w.spin.setPosSize((gx + 12, y + 4, 16, 16))       # inside the action button, left of "Working…"
 		y += 34
 		full = TIER["tier"] == "full"                                       # licensed: License key moves under About (inside it); free: next to About
 		small = [w.about] if full else [w.about, w.licence]
@@ -541,6 +597,11 @@ class Dialog(object):
 
 	def open(self):
 		if key(): check_tier()
+		prev = getattr(_OPEN, "dialog", None)                                # one Måns AI Tools window at a time, across all four plugins (Mans 2026-11-23)
+		if prev is not None and prev is not self:
+			try: prev.w.close()
+			except Exception: pass
+		_OPEN.dialog = self
 		self.build(); self.w.open()
 
 	def values(self):
@@ -564,6 +625,31 @@ class Dialog(object):
 
 	def about_(self, sender):
 		self.shown = not self.shown; self.w.about.setTitle("About ▾" if self.shown else "About ▸"); self.layout()
+
+	def note(self, text):
+		"""The amber ⚠️ note right over the buttons ("" hides it); as tall as its text."""
+		try:
+			from Foundation import NSMakeRect
+			self.w.note.set(("\u26a0\ufe0f " + text) if text else ""); h = 0   # ⚠️ in front
+			if text: h = int(self.w.note.getNSTextField().cell().cellSizeForBounds_(NSMakeRect(0, 0, self.W - 2 * self.M, 2000)).height) + 4
+			if h != self.note_h: self.note_h = h; self.layout()
+		except Exception:
+			log("note", traceback.format_exc())
+
+	def refresh_info(self):
+		if not self.info or self.w is None: return
+		try: self.w.info.set(self.info(self.current()))
+		except Exception: log("info", traceback.format_exc())
+
+	def spin(self, on):
+		"""The spinner in the action button. Drawn by the system's animation, so it keeps turning while Glyphs waits for the server."""
+		try:
+			self.w.spin.start() if on else self.w.spin.stop()
+			self.w.getNSWindow().displayIfNeeded()
+			import objc
+			objc.lookUpClass("CATransaction").flush()                                        # hand the animation to the window server before the main thread blocks
+		except Exception:
+			pass
 
 	def say(self, text):
 		try: self.w.msg.set(str(text))
@@ -627,18 +713,24 @@ class Dialog(object):
 
 	def go_(self, sender):
 		from GlyphsApp import Glyphs
-		self.say("")
+		show_status(self.w.msg)                                          # the version / licence line stays (a message from the last click is cleared)
 		if Glyphs.font is None:
 			self.say("Open a font first."); return
-		opts = self.values()
-		self.w.go.enable(False); self.w.go.setTitle("Working…")
+		opts = self.values(); self.refresh_info()
+		if self.check:
+			try: warning = self.check(opts) or ""
+			except Exception: warning = ""; log("check", traceback.format_exc())
+			if warning and warning != self.warned:                         # first click: the warning and a second button title; the same warning again = go
+				self.warned = warning; show_status(self.w.msg); self.note(warning); self.w.go.setTitle(self.action + " anyway"); return
+		self.warned = None; self.note("")
+		self.w.go.enable(False); self.w.go.setTitle("Working…"); self.spin(True)
 		try:
 			msg, names = result_parts(self.callback(opts))
 		except Exception as e:
 			traceback.print_exc(); log("ERROR", traceback.format_exc())
-			self.say("Error: %s" % (str(e)[:300] or "see Macro panel output.")); self.w.go.enable(True); self.w.go.setTitle(self.action)
+			self.spin(False); self.say("Error: %s" % (str(e)[:300] or "see Macro panel output.")); self.w.go.enable(True); self.w.go.setTitle(self.action)
 			return
-		self.w.go.enable(True); self.w.go.setTitle(self.action)
+		self.spin(False); self.w.go.enable(True); self.w.go.setTitle(self.action)
 		try: self.w.close()
 		except Exception: pass
 		if opts.get("tab", False): open_tab(Glyphs.font, names)          # only plugins with the new-tab option open one
